@@ -11,6 +11,7 @@ import { load as loadYaml } from 'js-yaml';
 import { ConnectionStore } from '../connections/store';
 import { ConnectionProviderRegistry } from '../connections/registry';
 import { ChatPanel } from './chatPanel';
+import { isAsyncIterable, tryFormatJsonString } from '../utils/markdown';
 
 function hasStructuredOutputs(agent: PromptAgent | undefined): boolean {
 	if (!agent) {return false;}
@@ -19,23 +20,6 @@ function hasStructuredOutputs(agent: PromptAgent | undefined): boolean {
 	const outputSchema = record.outputSchema;
 	if (!outputSchema || typeof outputSchema !== 'object') {return false;}
 	return Object.keys(outputSchema).length > 0;
-}
-
-/** Check if a value is an async iterable (i.e. a streaming response). */
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-	return value != null && typeof value === 'object' && Symbol.asyncIterator in value;
-}
-
-function tryFormatJsonString(value: string): string | undefined {
-	const trimmed = value.trim();
-	if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
-		return undefined;
-	}
-	try {
-		return JSON.stringify(JSON.parse(trimmed), null, 2);
-	} catch {
-		return undefined;
-	}
 }
 
 function formatRunResult(result: unknown, structured: boolean): string {

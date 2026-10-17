@@ -7,14 +7,13 @@ import type { PromptAgent } from '@prompty/core';
 import '@prompty/openai';
 import '@prompty/foundry';
 import '@prompty/anthropic';
-import { marked } from 'marked';
-import * as path from 'path';
 import { getNonce } from '../utils/nonce';
 import { ConnectionStore } from '../connections/store';
 import { ConnectionProviderRegistry } from '../connections/registry';
+import { renderSafeMarkdown, escapeHtml, isAsyncIterable, tryFormatJsonString } from '../utils/markdown';
 
 /** Render markdown to HTML for the chat webview. Detects image URLs and embeds them. */
-function renderMarkdown(content: string): string {
+function renderMarkdown(content: string, allowImages: boolean): string {
 	const formattedJson = tryFormatJsonString(content);
 	if (formattedJson) {
 		return renderJsonBlock(formattedJson);
@@ -25,25 +24,13 @@ function renderMarkdown(content: string): string {
 	const lines = content.split('\n');
 	const transformed = lines.map(line => {
 		const trimmed = line.trim();
-		if (imageUrlPattern.test(trimmed)) {
+		if (allowImages && imageUrlPattern.test(trimmed)) {
 			return `![Generated image](${trimmed})`;
 		}
 		return line;
 	}).join('\n');
 
-	return marked.parse(transformed, { async: false }) as string;
-}
-
-function escapeHtml(content: string): string {
-	return content
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;');
-}
-
-/** Check if a value is an async iterable (i.e. a streaming response). */
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-	return value != null && typeof value === 'object' && Symbol.asyncIterator in value;
+	return renderSafeMarkdown(transformed, allowImages);
 }
 
 function hasStructuredOutputs(agent: PromptAgent): boolean {
@@ -52,18 +39,6 @@ function hasStructuredOutputs(agent: PromptAgent): boolean {
 	const outputSchema = record.outputSchema;
 	if (!outputSchema || typeof outputSchema !== 'object') {return false;}
 	return Object.keys(outputSchema).length > 0;
-}
-
-function tryFormatJsonString(value: string): string | undefined {
-	const trimmed = value.trim();
-	if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
-		return undefined;
-	}
-	try {
-		return JSON.stringify(JSON.parse(trimmed), null, 2);
-	} catch {
-		return undefined;
-	}
 }
 
 function colorizeJson(json: string): string {
@@ -83,11 +58,11 @@ function renderJsonBlock(json: string): string {
 	return `<pre class="json-block"><code class="language-json">${colorizeJson(json)}</code></pre>`;
 }
 
-function formatAssistantResult(result: unknown, structured: boolean): { text: string; html: string } {
+function formatAssistantResult(result: unknown, structured: boolean, allowImages: boolean): { text: string; html: string } {
 	const text = typeof result === 'string'
 		? structured ? tryFormatJsonString(result) ?? result : result
 		: JSON.stringify(result, null, 2);
-	const html = renderMarkdown(text);
+	const html = renderMarkdown(text, allowImages);
 	return { text, html };
 }
 
@@ -138,6 +113,7 @@ export class ChatPanel {
 	private promptyTracer: PromptyTracer;
 	private hasTools: boolean;
 	private structuredOutputs: boolean;
+	private allowImages: boolean;
 	private sessionSpan: ReturnType<typeof Tracer.start> | undefined;
 	private turnCount = 0;
 	private sentInitialConversation = false;
@@ -186,6 +162,7 @@ export class ChatPanel {
 		this.sampleInputs = { ...sampleInputs };
 		this.hasTools = (agent.tools?.length ?? 0) > 0;
 		this.structuredOutputs = hasStructuredOutputs(agent);
+		this.allowImages = (agent.model as { apiType?: string } | undefined)?.apiType === 'image';
 		this.conversation = toChatMessages(this.sampleInputs[this.threadInputName]);
 
 		// Enable streaming for the chat panel — better UX for interactive use.
@@ -344,7 +321,7 @@ export class ChatPanel {
 				// Streaming path: debounced chunk delivery
 				await this.handleStreamingResponse(result);
 			} else {
-				const formatted = formatAssistantResult(result, this.structuredOutputs);
+				const formatted = formatAssistantResult(result, this.structuredOutputs, this.allowImages);
 				const assistantContent = formatted.text;
 				this.conversation.push({ role: 'assistant', content: assistantContent });
 				this.postMessage({
@@ -381,8 +358,8 @@ export class ChatPanel {
 			flushTimer = undefined;
 			needsFlush = false;
 			const html = this.structuredOutputs
-				? formatAssistantResult(accumulated, true).html
-				: renderMarkdown(accumulated);
+				? formatAssistantResult(accumulated, true, this.allowImages).html
+				: renderMarkdown(accumulated, this.allowImages);
 			this.postMessage({
 				command: 'streamChunk',
 				html,
@@ -407,11 +384,11 @@ export class ChatPanel {
 		}
 		if (needsFlush || accumulated) {
 			const finalMarkdown = this.structuredOutputs
-				? formatAssistantResult(accumulated, true).html
+				? formatAssistantResult(accumulated, true, this.allowImages).html
 				: accumulated;
 			this.postMessage({
 				command: 'streamChunk',
-				html: this.structuredOutputs ? finalMarkdown : renderMarkdown(finalMarkdown),
+				html: this.structuredOutputs ? finalMarkdown : renderMarkdown(finalMarkdown, this.allowImages),
 			});
 		}
 
@@ -419,7 +396,7 @@ export class ChatPanel {
 		this.postMessage({ command: 'streamEnd' });
 		this.conversation.push({
 			role: 'assistant',
-			content: this.structuredOutputs ? formatAssistantResult(accumulated, true).text : accumulated,
+			content: this.structuredOutputs ? formatAssistantResult(accumulated, true, this.allowImages).text : accumulated,
 		});
 	}
 
